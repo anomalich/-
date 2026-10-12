@@ -49,14 +49,36 @@ def send_telegram(text: str, chat_id: str = None) -> bool:
         return False
 
 
-def bot_is_online(server: JavaServer) -> bool:
-    """True, если игрок BOT_NICKNAME сейчас на сервере."""
+def check_server(server: JavaServer):
+    """Возвращает (бот_онлайн, подробности для диагностики)."""
     try:
         status = server.status()
-    except Exception:
-        return False  # сервер не отвечает вообще
+    except Exception as e:
+        return False, f"Не удалось подключиться к серверу: {type(e).__name__}: {e}"
+
     sample = status.players.sample or []
-    return any(p.name.lower() == BOT_NICKNAME.lower() for p in sample)
+    names = [p.name for p in sample]
+    try:
+        motd = status.motd.to_plain()
+    except Exception:
+        motd = "?"
+    info = (f"Сервер ответил. Игроков: {status.players.online}/{status.players.max}. "
+            f"Видимый список имён: {names if names else 'пусто'}. "
+            f"Версия: {status.version.name}. MOTD: {motd}")
+    found = any(n.lower() == BOT_NICKNAME.lower() for n in names)
+    return found, info
+
+
+_last_info = None
+
+
+def bot_is_online(server: JavaServer) -> bool:
+    global _last_info
+    found, info = check_server(server)
+    if info != _last_info:      # пишем в лог только когда ответ изменился
+        print(f"[Проверка] {info}")
+        _last_info = info
+    return found
 
 
 def tg_api(method: str, **params):
@@ -68,7 +90,7 @@ def tg_api(method: str, **params):
 
 def commands_loop() -> None:
     """Слушает команды /status от участников чата и отвечает актуальным статусом."""
-    server = JavaServer.lookup(SERVER_ADDRESS)
+    server = JavaServer.lookup(SERVER_ADDRESS, timeout=10)
     offset = 0
 
     try:
@@ -88,7 +110,10 @@ def commands_loop() -> None:
                 if not text.startswith("/"):
                     continue
                 cmd = text.split()[0].split("@")[0]   # "/status@botname" -> "/status"
-                if cmd in ("/status", "/start"):
+                if cmd == "/debug":
+                    _, info = check_server(server)
+                    send_telegram(info, chat_id=msg["chat"]["id"])
+                elif cmd in ("/status", "/start"):
                     answer = MSG_ONLINE if bot_is_online(server) else MSG_OFFLINE
                     send_telegram(answer, chat_id=msg["chat"]["id"])
         except Exception as e:
@@ -120,7 +145,7 @@ def run_health_server() -> None:
 
 
 def main() -> None:
-    server = JavaServer.lookup(SERVER_ADDRESS)
+    server = JavaServer.lookup(SERVER_ADDRESS, timeout=10)
     state = None      # реальное состояние: None / True / False
     reported = None   # последнее состояние, которое УСПЕШНО отправили в Telegram
     fails = 0
